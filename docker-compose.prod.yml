@@ -1,0 +1,12 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports: ["5000:5000"]
+    environment:
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+    # keep instance volume if you need persistent runtime files/logs
+    volumes:
+      - ./instance:/app/instance
+    command: gunicorn -w 4 -k gthread -t 60 -b 0.0.0.0:5000 "app:create_app()"
