@@ -19,3 +19,7 @@ docker compose up
 ********************************
 docker compose build api
 docker compose up api
+
+# inside the container
+rm -f /app/instance/app.db
+# then restart your container / app

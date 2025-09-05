@@ -2,10 +2,11 @@
 from __future__ import annotations
 from flask import request, jsonify
 from ..extensions import db
-from ..model import Product
-from ..model.cart import Cart, CartItem
 from . import bp
+from datetime import datetime, timezone
+from ..model import Product, Coupon, CartCoupon, Cart, CartItem 
 
+# ---- standard API response format ------------------------------------------
 def api_ok(msg, data=None): return {"ok": True, "message": msg, "data": data}
 def api_error(msg, data=None): return {"ok": False, "message": msg, "data": data}
 def ok(msg, data=None, status=200):
@@ -14,7 +15,82 @@ def err(msg, status=400, data=None):
     r = jsonify(api_error(msg, data)); r.status_code = status; return r
 
 # ---- helpers ---------------------------------------------------------------
-# near your other helpers
+
+_COUPON_DTYPES = {"percent", "fixed"}
+
+def _now_utc():
+    return datetime.now(timezone.utc)
+
+def _validate_coupon_structure(c: "Coupon"):
+    if (c.ctype or "").lower() not in _COUPON_DTYPES:
+        raise ValueError("coupon type must be 'percent' or 'fixed'")
+    if c.value is None or float(c.value) <= 0:
+        raise ValueError("coupon value must be > 0")
+    if c.ctype == "percent" and float(c.value) > 100:
+        raise ValueError("percent coupon must be ≤ 100")
+
+def _coupon_is_active(c: "Coupon") -> bool:
+    if not c.active:
+        return False
+    now = _now_utc()
+    if c.starts_at and now < c.starts_at:
+        return False
+    if c.ends_at and now > c.ends_at:
+        return False
+    return True
+
+def _cart_subtotal_after_item_and_cart_discounts(cart: Cart) -> float:
+    # You already compute per-item net in _unit_net_price. Sum it:
+    subtotal = 0.0
+    for it in cart.items:
+        subtotal += _unit_net_price(it) * int(it.quantity or 0)
+    # If you store cart-level discount fields:
+    if getattr(cart, "cart_discount_type", None):
+        t = (cart.cart_discount_type or "").lower()
+        v = float(cart.cart_discount_value or 0.0)
+        if t == "percent":
+            subtotal -= max(0.0, min(subtotal, subtotal * (v/100.0)))
+        elif t == "fixed":
+            subtotal -= max(0.0, min(subtotal, v))
+    return round(max(0.0, subtotal), 2)
+
+def _coupon_discount_amount(c: "Coupon", base_amount: float) -> float:
+    if base_amount <= 0:
+        return 0.0
+    if (c.ctype or "").lower() == "percent":
+        return round(min(base_amount, base_amount * (float(c.value)/100.0)), 2)
+    # fixed currency
+    return round(min(base_amount, float(c.value)), 2)
+
+def _can_apply_coupon(cart: Cart, c: "Coupon") -> tuple[bool, str | None]:
+    _validate_coupon_structure(c)
+    if not _coupon_is_active(c):
+        return False, "invalid or inactive coupon"
+
+    base = _cart_subtotal_after_item_and_cart_discounts(cart)
+
+    if c.min_subtotal and base < float(c.min_subtotal):
+        return False, f"subtotal must be ≥ {float(c.min_subtotal):.2f}"
+
+    # prevent duplicate in this cart (you already check by code on add)
+    used_in_cart = sum(1 for link in cart.coupons if link.coupon_id == c.id)
+    if c.max_uses_per_cart and used_in_cart >= c.max_uses_per_cart:
+        return False, "coupon already applied maximum times for this cart"
+
+    # global cap (requires you to increment usage when orders complete — not shown here)
+    if c.max_uses is not None and c.max_uses < 0:
+        return False, "coupon exhausted"
+
+    # stackability: if false, only allow when no other coupons
+    if (c.stackable is False) and len(cart.coupons) > 0:
+        return False, "coupon cannot be combined"
+
+    # no numeric error; amount 0 still means “applies but gives 0”
+    return True, None
+# ============================================================================
+
+
+
 _VALID_DTYPES = {"percent", "fixed"}
 
 def _sanitize_discount(dtype: str | None, dval) -> tuple[str | None, float | None]:
@@ -25,13 +101,78 @@ def _sanitize_discount(dtype: str | None, dval) -> tuple[str | None, float | Non
         dval = float(dval)
     except Exception:
         dval = None
-    if dtype not in _VALID_DTYPES:
+    if dtype not in {"percent", "fixed"}:
         raise ValueError("discount type must be 'percent' or 'fixed'")
     if dval is None or dval <= 0:
         raise ValueError("discount value must be > 0")
-    if dtype == "percent" and dval > 100:
-        dval = 100.0
+
+    if dtype == "percent":
+        # NEW: cap percent at 50, not 100
+        # dval = _cap_percent(dval)
+        dval=_validate_percent(dval)
+        if dval <= 0:
+            raise ValueError(f"percent discount must be > 0 and ≤ {MAX_PERCENT_DISCOUNT}")
     return dtype, dval
+
+def _clear_discount(item: CartItem):
+    item.discount_type = None
+    item.discount_value = None
+
+
+def register_error_handlers(app):
+    @app.errorhandler(ValueError)
+    def handle_value_error(e):
+        r = jsonify({"ok": False, "message": str(e), "data": None})
+        r.status_code = 422
+        return r
+
+
+# ---- discount caps ----------------------------------------------------------
+MAX_FIXED_DISCOUNT_RATE = 0.50 
+MAX_PERCENT_DISCOUNT     = 50.0
+
+# def _cap_fixed_to_unit_price(item: CartItem, dval: float) -> float:
+#     """Cap per-unit fixed discount to ≤ 50% of unit price, clamp [0, cap], round to cents."""
+#     unit_price = float(item.product_price or 0.0)
+#     cap = unit_price * MAX_FIXED_DISCOUNT_RATE
+#     try:
+#         d = float(dval)
+#     except Exception:
+#         d = 0.0
+#     d = max(0.0, min(d, cap))
+#     return round(d, 2)
+
+# def _cap_percent(dval: float) -> float:
+#     """Cap percent discount to ≤ 50%."""
+#     try:
+#         d = float(dval)
+#     except Exception:
+#         d = 0.0
+#     d = max(0.0, min(d, MAX_PERCENT_DISCOUNT))
+#     return round(d, 2)
+
+
+def _validate_percent(dval: float) -> float:
+    try:
+        d = float(dval)
+    except Exception:
+        raise ValueError("invalid percent discount")
+    if d <= 0 or d > MAX_PERCENT_DISCOUNT:
+        raise ValueError(f"percent discount must be > 0 and ≤ {MAX_PERCENT_DISCOUNT}")
+    return round(d, 2)
+
+def _validate_fixed(item: CartItem, dval: float) -> float:
+    try:
+        d = float(dval)
+    except Exception:
+        raise ValueError("invalid fixed discount")
+    unit_price = float(item.product_price or 0.0)
+    cap = unit_price * MAX_FIXED_DISCOUNT_RATE
+    if d <= 0 or d > cap:
+        raise ValueError(f"fixed discount must be > 0 and ≤ {cap:.2f}")
+    return round(d, 2)
+
+#   --------------------------------------------------------------------------
 
 def _get_or_create_cart_by_uuid(cart_uuid: str | None) -> Cart:
     q = Cart.query.filter_by(status="active")
@@ -65,6 +206,26 @@ def _resolve_cart() -> Cart:
     if legacy:
         return legacy
     return _get_or_create_cart_by_uuid(None)
+
+# ============================================================================
+def _unit_discount_amount(item: CartItem) -> float:
+    price = float(item.product_price or 0.0)
+    dtype = (item.discount_type or "").lower()
+    dval  = float(item.discount_value or 0.0)
+
+    if dtype == "percent":
+        amt = price * (dval / 100.0)
+    elif dtype == "fixed":
+        amt = dval                   # already capped when set
+    else:
+        amt = 0.0
+
+    # never discount below 0 or above price
+    amt = max(0.0, min(amt, price))
+    return round(amt, 2)
+
+def _unit_net_price(item: CartItem) -> float:
+    return round(float(item.product_price or 0.0) - _unit_discount_amount(item), 2)
 
 # ---- endpoints -------------------------------------------------------------
 
@@ -325,4 +486,160 @@ def remove_cart():
 
     resp = ok("cart removed; new cart ready", new_cart.as_api(), status=200)
     resp.headers["X-Cart-Id"] = new_cart.uuid
+    return resp
+
+@bp.patch("/items/<int:item_id>/discount")
+def set_item_discount(item_id: int):
+    cart = _resolve_cart()
+    item: CartItem | None = next((i for i in cart.items if i.id == item_id), None)
+    if not item:
+        return err("item not found in this cart", 404)
+
+    data = request.get_json(silent=True) or {}
+    if data.get("clear") is True:
+        _clear_discount(item)
+    else:
+        if "type" not in data or "value" not in data:
+            return err("type and value are required (or set clear=true)", 422)
+        try:
+            dtype, dval = _sanitize_discount(data.get("type"), data.get("value"))
+            if dtype == "percent":
+                dval = _validate_percent(dval)           # may raise ValueError
+            elif dtype == "fixed":
+                dval = _validate_fixed(item, dval)       # may raise ValueError
+        except ValueError as e:
+            return err(str(e), 422)
+
+        item.discount_type = dtype
+        item.discount_value = dval
+
+    db.session.commit()
+    resp = ok("discount updated", cart.as_api(), status=200)
+    resp.headers["X-Cart-Id"] = cart.uuid
+    return resp
+
+@bp.patch("/items/by-product/<int:product_id>/discount")
+def set_item_discount_by_product(product_id: int):
+    cart = _resolve_cart()
+    item = _find_item_by_product(cart, product_id)
+    if not item:
+        return err("item not found in this cart", 404)
+
+    data = request.get_json(silent=True) or {}
+    if data.get("clear") is True:
+        _clear_discount(item)
+    else:
+        if "type" not in data or "value" not in data:
+            return err("type and value are required (or set clear=true)", 422)
+        try:
+            dtype, dval = _sanitize_discount(data.get("type"), data.get("value"))
+            if dtype == "percent":
+                dval = _validate_percent(dval)           # may raise ValueError
+            elif dtype == "fixed":
+                dval = _validate_fixed(item, dval)       # may raise ValueError
+        except ValueError as e:
+            return err(str(e), 422)
+
+        item.discount_type = dtype
+        item.discount_value = dval
+
+    db.session.commit()
+    resp = ok("discount updated", cart.as_api(), status=200)
+    resp.headers["X-Cart-Id"] = cart.uuid
+    return resp
+
+
+@bp.patch("/discount")
+def set_cart_discount():
+    """
+    Body (apply): { "type": "percent" | "fixed", "value": number }
+    Body (clear): { "clear": true }
+    Applies at cart/invoice level AFTER item discounts, BEFORE coupons.
+    """
+    cart = _resolve_cart()
+    data = request.get_json(silent=True) or {}
+
+    if data.get("clear") is True:
+        cart.cart_discount_type = None
+        cart.cart_discount_value = None
+    else:
+        if "type" not in data or "value" not in data:
+            return err("type and value are required (or set clear=true)", 422)
+        try:
+            dtype, dval = _sanitize_discount(data.get("type"), data.get("value"))
+        except ValueError as e:
+            return err(str(e), 422)
+        cart.cart_discount_type = dtype
+        cart.cart_discount_value = dval
+
+    db.session.commit()
+    resp = ok("cart discount updated", cart.as_api(), status=200)
+    resp.headers["X-Cart-Id"] = cart.uuid
+    return resp
+
+@bp.post("/coupons")
+def add_coupon():
+    """
+    Body: { "code": "SUMMER10" }
+    Validates existence & active==True.
+    Prevents duplicates.
+    """
+    cart = _resolve_cart()
+    data = request.get_json(silent=True) or {}
+    code = (data.get("code") or "").strip()
+    if not code:
+        return err("code is required", 422)
+
+    coupon = Coupon.query.filter(Coupon.code.ilike(code)).first()
+    if not coupon or not getattr(coupon, "active", True):
+        return err("invalid or inactive coupon", 404)
+
+    # prevent duplicate link
+    if any(link.coupon_id == coupon.id for link in cart.coupons):
+        return err("coupon already applied", 409)
+
+    db.session.add(CartCoupon(cart_id=cart.id, coupon_id=coupon.id))
+    db.session.commit()
+
+    resp = ok("coupon added", cart.as_api(), status=200)
+    resp.headers["X-Cart-Id"] = cart.uuid
+    return resp
+
+
+@bp.get("/coupons")
+def list_coupons():
+    cart = _resolve_cart()
+    resp = ok("coupons", cart.as_api(), status=200)
+    resp.headers["X-Cart-Id"] = cart.uuid
+    return resp
+
+
+@bp.delete("/coupons/<code>")
+def remove_coupon(code: str):
+    cart = _resolve_cart()
+    # find by code among this cart's links
+    link = None
+    for l in cart.coupons:
+        c = getattr(l, "coupon", None)
+        if c and c.code.lower() == code.lower():
+            link = l
+            break
+    if not link:
+        return err("coupon not found on this cart", 404)
+
+    db.session.delete(link)
+    db.session.commit()
+
+    resp = ok("coupon removed", cart.as_api(), status=200)
+    resp.headers["X-Cart-Id"] = cart.uuid
+    return resp
+
+
+@bp.delete("/coupons")
+def clear_coupons():
+    cart = _resolve_cart()
+    cart.coupons.clear()
+    db.session.commit()
+    resp = ok("all coupons removed", cart.as_api(), status=200)
+    resp.headers["X-Cart-Id"] = cart.uuid
     return resp

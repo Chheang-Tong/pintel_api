@@ -5,6 +5,7 @@ from .product import Product, ProductImage
 from .category import Category
 from .cart import Cart, CartItem
 from .types import GUID
+from .coupon import Coupon, CartCoupon
 
 __all__ = [
     "Product",
@@ -14,6 +15,7 @@ __all__ = [
     "Category",
     "Cart",
     "CartItem",
-    
+    "Coupon",
+    "CartCoupon", #CartCoupon
     "GUID",
 ]

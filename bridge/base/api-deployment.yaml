@@ -1,0 +1,58 @@
+#! api-deployment.yaml
+# Generated code, do not edit
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: api
+    namespace: pintel-api
+    labels:
+        com.docker.compose.project: pintel_api
+        com.docker.compose.service: api
+spec:
+    replicas: 1
+    selector:
+        matchLabels:
+            com.docker.compose.project: pintel_api
+            com.docker.compose.service: api
+    strategy:
+        type: Recreate
+    template:
+        metadata:
+            labels:
+                com.docker.compose.project: pintel_api
+                com.docker.compose.service: api
+                com.docker.compose.network.default: "true"
+        spec:
+            containers:
+                - name: api
+                  image: pintel_api-api
+                  imagePullPolicy: IfNotPresent
+                  command: [flask run --host=0.0.0.0 --port=5000 --debug]
+                  env:
+                    - name: FLASK_APP
+                      value: "app:create_app"
+                    - name: FLASK_DEBUG
+                      value: "1"
+                    - name: FLASK_ENV
+                      value: "development"
+                    - name: JWT_SECRET_KEY
+                      value: "dev-secret-change-me"
+                    - name: PYTHONDONTWRITEBYTECODE
+                      value: "1"
+                    - name: PYTHONUNBUFFERED
+                      value: "1"
+                  ports:
+                    - name: api-5000
+                      containerPort: 5000
+                  volumeMounts:
+                    - name: app-instance
+                      mountPath: /app/instance
+                    - name: app
+                      mountPath: /app
+            volumes:
+                - name: app-instance
+                  hostPath:
+                    path: /Users/davidlong/Desktop/pintel_api/instance
+                - name: app
+                  hostPath:
+                    path: /Users/davidlong/Desktop/pintel_api
