@@ -1,14 +1,14 @@
 # app/cart/routes.py
 from __future__ import annotations
 from flask import request, jsonify
+
+from app.utils.api import api_ok, api_error
 from ..extensions import db
 from . import bp
 from datetime import datetime, timezone
 from ..model import Product, Coupon, CartCoupon, Cart, CartItem 
 
-# ---- standard API response format ------------------------------------------
-def api_ok(msg, data=None): return {"ok": True, "message": msg, "data": data}
-def api_error(msg, data=None): return {"ok": False, "message": msg, "data": data}
+# # ---- standard API response format ------------------------------------------
 def ok(msg, data=None, status=200):
     r = jsonify(api_ok(msg, data)); r.status_code = status; return r
 def err(msg, status=400, data=None):

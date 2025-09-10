@@ -7,7 +7,7 @@ from . import bp
 from ..model import User, RefreshToken
 from ..extensions import db 
 from ..utils.api import api_ok, api_error
-from ..utils.decorators import require_headers, role_required
+from ..utils.decorators import _current_user, require_headers, role_at_least, role_required
 import uuid
 
 
@@ -26,9 +26,10 @@ def _issue_tokens(user_id: int, access_ttl_hours: int = 1, refresh_ttl_days: int
     db.session.add(refresh_row)
     return access_token, refresh_token_str
 
+
 @bp.post("/register")
 @require_headers
-@jwt_required(optional=True)  # <-- allow with/without token
+@jwt_required(optional=True)   # allow no-token public signups, but honor role only if privileged
 def register():
     data = request.get_json(silent=True) or {}
     email = (data.get("email") or "").strip().lower()
@@ -44,34 +45,27 @@ def register():
     if User.query.filter_by(email=email).first():
         return jsonify(api_error("Email already registered")), 409
 
-    # default (bootstrap first account as admin)
+    # Bootstrap: very first account becomes admin
     is_first_user = db.session.query(User.id).count() == 0
     role = "admin" if is_first_user else "user"
 
-    # admin-only override
+    # Admin-only override; managers can create users (forced)
     requested_role = (data.get("role") or "user").strip().lower()
     allowed = {"user", "manager", "admin"}
+    caller_id = get_jwt_identity()
+    if not is_first_user and caller_id:
+        try: caller = User.query.get(int(caller_id))
+        except: caller = None
+        if caller and caller.role == "admin" and requested_role in allowed:
+            role = requested_role
+        elif caller and caller.role == "manager":
+            role = "user"   # managers can only create users
 
-    if not is_first_user:
-        caller_id = get_jwt_identity()  # will be None if no token sent
-        if caller_id:
-            caller = User.query.get(int(caller_id))
-            if caller and caller.role == "admin" and requested_role in allowed:
-                role = requested_role
-
-    user = User(
-        email=email,
-        password_hash=generate_password_hash(password),
-        name=name,
-        role=role,
-    )
+    user = User(email=email, password_hash=generate_password_hash(password), name=name, role=role)
     db.session.add(user)
     db.session.commit()
-    return jsonify(api_ok("Account created successfully", data={
-        "user": user.as_dict(),
-        "user_logged_in": True
-    })), 201
 
+    return jsonify(api_ok("Account created successfully", data={"user": user.as_dict(), "user_logged_in": True})), 201
 
 @bp.post("/login")
 @require_headers
@@ -171,24 +165,32 @@ def manager_report():
     return {"msg": "Admins & Managers can see this"}
 
 @bp.patch("/users/<int:user_id>/role")
-@jwt_required()
 @role_required("admin")
 def update_user_role(user_id):
+    actor = _current_user()  # from decorators.py
     body = request.get_json(silent=True) or {}
     new_role = (body.get("role") or "").strip().lower()
     if new_role not in {"user", "admin", "manager"}:
         return jsonify(api_error("Invalid role")), 400
 
-    u = User.query.get(user_id)
-    if not u:
+    target = User.query.get(user_id)
+    if not target:
         return jsonify(api_error("User not found")), 404
 
-    u.role = new_role
+    # Admin can manage managers & users; can also manage admins, but…
+    # Prevent demoting the LAST admin
+    if target.role == "admin" and new_role != "admin":
+        admin_count = db.session.query(User).filter_by(role="admin").count()
+        if admin_count <= 1:
+            return jsonify(api_error("Cannot demote the last admin")), 400
+
+    target.role = new_role
     db.session.commit()
-    return jsonify(api_ok("Role updated", data={"user": u.as_dict()}))
+    return jsonify(api_ok("Role updated", data={"user": target.as_dict()})), 200
+
 
 @bp.get("/reports")
-@role_required("manager")
+@role_at_least("manager")
 def manager_reports():
     return {"msg": "Managers only"}
 
@@ -197,35 +199,34 @@ def manager_reports():
 def admin_settings():
     return {"msg": "Admins only"}
 
-@bp.post("/bootstrap-admin")
-def bootstrap_admin():
-    data = request.get_json(silent=True) or {}
-    secret = (data.get("secret") or "").strip()
-    expected = os.getenv("ADMIN_BOOTSTRAP_SECRET", "")
-    if not expected or secret != expected:
-        return jsonify(api_error("Forbidden")), 403
+@bp.get("/users")
+@role_at_least("manager")
+def list_users():
+    actor = _current_user()
+    q = User.query
+    if actor.role == "manager":
+        q = q.filter(User.role == "user")
+    items = [u.as_dict() for u in q.order_by(User.id.asc()).all()]
+    return jsonify(api_ok("OK", data={"users": items})), 200
 
-    # allow only if there is no admin yet
-    has_admin = db.session.query(
-        db.session.query(User).filter_by(role="admin").exists()
-    ).scalar()
-    if has_admin:
-        return jsonify(api_error("Admin already exists")), 409
+@bp.delete("/users/<int:user_id>")
+@role_at_least("manager")
+def delete_user(user_id):
+    actor = _current_user()
+    target = User.query.get(user_id)
+    if not target:
+        return jsonify(api_error("User not found")), 404
 
-    email = (data.get("email") or "").strip().lower()
-    password = data.get("password") or ""
-    name = (data.get("name") or "").strip()
-    if not email or not password or not name:
-        return jsonify(api_error("email, password, name required")), 400
-    if User.query.filter_by(email=email).first():
-        return jsonify(api_error("Email already registered")), 409
+    # Managers can manage only users; admins can manage managers+users
+    if actor.role == "manager" and target.role != "user":
+        return jsonify(api_error("Forbidden: managers may delete users only")), 403
 
-    u = User(
-        email=email,
-        name=name,
-        password_hash=generate_password_hash(password),
-        role="admin",
-    )
-    db.session.add(u)
+    # Admin cannot remove the last admin
+    if target.role == "admin":
+        admin_count = db.session.query(User).filter_by(role="admin").count()
+        if admin_count <= 1:
+            return jsonify(api_error("Cannot delete the last admin")), 400
+
+    db.session.delete(target)
     db.session.commit()
-    return jsonify(api_ok("Admin bootstrapped", data={"user": u.as_dict()})), 201
+    return jsonify(api_ok("User deleted")), 200
