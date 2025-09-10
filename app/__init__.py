@@ -1,6 +1,8 @@
 # --- app/__init__.py ---
 import os
 from flask import Flask, jsonify
+
+from app.cli import register_cli
 from .extensions import db, jwt, cors, migrate
 from datetime import timedelta
 
@@ -71,5 +73,5 @@ def create_app():
         db.create_all()
         print("USING DB:", app.config["SQLALCHEMY_DATABASE_URI"])
 
-
+    register_cli(app)
     return app

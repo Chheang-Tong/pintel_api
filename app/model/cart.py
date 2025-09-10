@@ -16,7 +16,7 @@ class Cart(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     uuid = db.Column(db.String(36), unique=True, index=True, default=lambda: str(_uuid.uuid4()))
-    user_id = db.Column(db.Integer, nullable=True, index=True)
+    user_id = db.Column(db.Integer, nullable=True, index=True)#none use
     session_id = db.Column(db.String(64), nullable=True, index=True)
     status = db.Column(db.String(16), default="active", index=True)
     created_at = db.Column(db.DateTime, server_default=func.now())

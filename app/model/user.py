@@ -7,12 +7,14 @@ class User(db.Model):
     name=db.Column(db.String(180), nullable=True)
     email = db.Column(db.String(255), unique=True, nullable=False, index=True)
     password_hash = db.Column(db.String(100), nullable=False,default="")
+    role= db.Column(db.String(50), nullable=False, default="user", index=True) # roles: user, admin
 
     def as_dict(self):
         return {
             "id": self.id, 
             "email": self.email, 
             "name": self.name,
+            "role": self.role
             }
     
 class RefreshToken(db.Model):
