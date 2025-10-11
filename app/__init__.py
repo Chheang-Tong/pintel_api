@@ -33,6 +33,7 @@ def create_app():
     from .cart import bp as cart_bp; app.register_blueprint(cart_bp)
     # from .coupon import admin_bp as coupons_bp;app.register_blueprint(coupons_bp)
     from .coupon import bp as coupon_bp; app.register_blueprint(coupon_bp)
+    from .notification import bp as notification_bp; app.register_blueprint(notification_bp)
 
 
     @app.get("/")
