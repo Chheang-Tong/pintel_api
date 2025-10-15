@@ -1,0 +1,3 @@
+barcode,slug,name,code,price,is_pin,price_format,quantity,minimum_order,subtract_stock,out_of_stock_status,date_available,sort_order,status,is_new,viewed,is_favourite,reviewable,unit,ean_code,category_id
+1234567890,product-1,Product 1,P001,20.99,False,$20.99,100,1,yes,in_stock,2025-10-14,0,True,True,0,False,True,pcs,EAN001234567890,1
+1234567891,product-2,Product 2,P002,15.99,True,$15.99,200,1,yes,in_stock,2025-10-14,0,True,True,10,True,True,pcs,EAN001234567891,1
