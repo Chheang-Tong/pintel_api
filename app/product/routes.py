@@ -1,7 +1,7 @@
-from flask import request, jsonify, url_for, current_app
+from flask import request, jsonify, url_for, current_app, send_file
 from werkzeug.utils import secure_filename
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import or_,desc, asc
+from sqlalchemy import or_, desc, asc
 from ..extensions import db
 from ..model import Product, ProductImage, Category
 from ..utils.decorators import require_headers
@@ -9,6 +9,8 @@ from ..utils.api import api_ok, api_error
 from . import bp
 import os
 import re
+import pandas as pd
+from io import BytesIO
 
 # ---------- helpers ----------
 def _ep(name: str) -> str:
@@ -529,3 +531,102 @@ def set_pin(pid):
         db.session.rollback()
         return err("Failed to update pin", data={"detail": str(e.orig)})
     return ok("Pin updated", product.as_api())
+@bp.get("/export")
+@require_headers
+def export_products():
+    """
+    Export all products as an Excel file.
+    """
+    products = Product.query.all()
+    product_data = [{
+        "Barcode": p.barcode,
+        "Slug": p.slug,
+        "Name": p.name,
+        "Code": p.code,
+        "Price": p.price,
+        "Quantity": p.quantity,
+        "Minimum Order": p.minimum_order,
+        "Subtract Stock": p.subtract_stock,
+        "Out of Stock Status": p.out_of_stock_status,
+        "Date Available": p.date_available,
+        "Status": p.status,
+        "Is New": p.is_new,
+        "Viewed": p.viewed,
+        "Is Favourite": p.is_favourite,
+        "Reviewable": p.reviewable,
+        "Unit": p.unit,
+        "EAN Code": p.ean_code,
+        "Category ID": p.category_id,
+    } for p in products]
+    df = pd.DataFrame(product_data)
+
+    # Create an in-memory buffer
+    output = BytesIO()
+    df.to_excel(output, index=False)
+    output.seek(0)
+
+    return send_file(
+        output, 
+        as_attachment=True, 
+        download_name="products_export.xlsx", 
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+@bp.post("/import")
+@require_headers
+def import_products():
+    """
+    Import products from an uploaded .xlsx file.
+    """
+    if "file" not in request.files:
+        return err("No file part", status_code=400)
+    
+    file = request.files["file"]
+    if file.filename == "":
+        return err("No selected file", status_code=400)
+
+    if not file.filename.endswith(".xlsx"):
+        return err("Only .xlsx files are allowed", status_code=400)
+
+    try:
+        # Read the uploaded Excel file into a pandas DataFrame
+        df = pd.read_excel(file)
+
+        # Validate the columns
+        required_columns = ['Barcode', 'Slug', 'Name', 'Code', 'Price', 'Quantity', 'Minimum Order', 
+                            'Subtract Stock', 'Out of Stock Status', 'Date Available', 'Status', 
+                            'Is New', 'Viewed', 'Is Favourite', 'Reviewable', 'Unit', 'EAN Code', 'Category ID']
+        if not all(col in df.columns for col in required_columns):
+            return err("Missing required columns in the uploaded file", status_code=400)
+
+        # Insert products into the database
+        for _, row in df.iterrows():
+            product = Product(
+                barcode=row['Barcode'],
+                slug=row['Slug'],
+                name=row['Name'],
+                code=row['Code'],
+                price=row['Price'],
+                quantity=row['Quantity'],
+                minimum_order=row['Minimum Order'],
+                subtract_stock=row['Subtract Stock'],
+                out_of_stock_status=row['Out of Stock Status'],
+                date_available=row['Date Available'],
+                status=row['Status'],
+                is_new=row['Is New'],
+                viewed=row['Viewed'],
+                is_favourite=row['Is Favourite'],
+                reviewable=row['Reviewable'],
+                unit=row['Unit'],
+                ean_code=row['EAN Code'],
+                category_id=row['Category ID']
+            )
+            db.session.add(product)
+
+        # Commit the changes to the database
+        db.session.commit()
+
+        return ok("Products imported successfully", status_code=200)
+    except Exception as e:
+        db.session.rollback()
+        return err(f"Error importing products: {str(e)}", status_code=500)

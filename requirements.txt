@@ -1,5 +1,8 @@
+# requirements.txt
 flask
 flask_sqlalchemy
 flask_jwt_extended
 flask_cors
 flask-migrate
+pandas
+openpyxl
