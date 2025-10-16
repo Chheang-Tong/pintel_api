@@ -1,10 +1,16 @@
 # --- app/__init__.py ---
 import os
 from flask import Flask, jsonify
-
 from app.cli import register_cli
 from .extensions import db, jwt, cors, migrate
-from datetime import timedelta
+from datetime import timedelta, datetime
+import logging
+
+# --- Local time formatter ---
+class CambodiaFormatter(logging.Formatter):
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.utcfromtimestamp(record.created) + timedelta(hours=7)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 def create_app():
     app = Flask(__name__, instance_relative_config=True)
@@ -14,32 +20,38 @@ def create_app():
 
     os.makedirs(app.instance_path, exist_ok=True)
     db_path = os.path.join(app.instance_path, "app.db")
-    app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("SQLALCHEMY_DATABASE_URI",f"sqlite:///{db_path}",)
+    app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("SQLALCHEMY_DATABASE_URI", f"sqlite:///{db_path}")
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
     app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY", "dev-secret-change-me")
     app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(days=1)
     app.config["JWT_REFRESH_TOKEN_EXPIRES"] = timedelta(days=30)
 
-    # Init extensions
+    # --- Init extensions ---
     db.init_app(app)
     jwt.init_app(app)
     cors.init_app(app, resources={r"/*": {"origins": "*"}})
     migrate.init_app(app, db)
 
-    # Register blueprints
+    # --- Localtime logging setup ---
+    handler = logging.StreamHandler()
+    handler.setFormatter(CambodiaFormatter("%(asctime)s | %(message)s"))
+    # handler.setFormatter(formatter)
+    app.logger.handlers = [handler]
+    app.logger.setLevel(logging.INFO)
+
+    # --- Register blueprints ---
     from .auth import bp as auth_bp; app.register_blueprint(auth_bp)
     from .product import bp as product_bp; app.register_blueprint(product_bp)
     from .category import bp as category_bp; app.register_blueprint(category_bp)
     from .cart import bp as cart_bp; app.register_blueprint(cart_bp)
-    # from .coupon import admin_bp as coupons_bp;app.register_blueprint(coupons_bp)
     from .coupon import bp as coupon_bp; app.register_blueprint(coupon_bp)
     from .notification import bp as notification_bp; app.register_blueprint(notification_bp)
-
 
     @app.get("/")
     def health():
         return jsonify(ok=True, msg="API running")
 
+    # --- Debug / DB setup ---
     with app.app_context():
         import importlib
         import app as apppkg

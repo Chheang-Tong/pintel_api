@@ -1,6 +1,13 @@
 # app/model/product.py
 from ..extensions import db
 from sqlalchemy.sql import func
+from datetime import timedelta
+
+# --- Helper to convert UTC datetime to Cambodia time ---
+def to_cambodia_time(dt):
+    if dt:
+        return (dt + timedelta(hours=7)).strftime("%Y-%m-%d %H:%M:%S")
+    return None
 
 class Product(db.Model):
     __tablename__ = "product"
@@ -69,8 +76,8 @@ class Product(db.Model):
             "reviewable": self.reviewable,
             "images": [img.as_api() for img in self.images],
             "promotion": None,                        # fill if you have a promo table
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "created_at": to_cambodia_time(self.created_at),
+            "updated_at": to_cambodia_time(self.updated_at),
             "unit": self.unit,
             "ean_code": self.ean_code,
             "category": self.category.as_dict() if self.category else None,
