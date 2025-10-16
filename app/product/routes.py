@@ -10,6 +10,7 @@ from . import bp
 import os
 import re
 import pandas as pd
+from datetime import datetime
 from io import BytesIO
 
 # ---------- helpers ----------
@@ -601,6 +602,20 @@ def import_products():
 
         # Insert products into the database
         for _, row in df.iterrows():
+    # Convert date to string in YYYY-MM-DD format
+            date_available = row['Date Available']
+            if pd.notnull(date_available):
+                if isinstance(date_available, pd.Timestamp):
+                    date_available = date_available.strftime("%Y-%m-%d")
+                elif isinstance(date_available, str):
+                    # optional: validate string format
+                    try:
+                        datetime.strptime(date_available, "%Y-%m-%d")
+                    except ValueError:
+                        return err(f"Invalid date format for {row['Name']}")
+            else:
+                date_available = None
+
             product = Product(
                 barcode=row['Barcode'],
                 slug=row['Slug'],
@@ -611,7 +626,7 @@ def import_products():
                 minimum_order=row['Minimum Order'],
                 subtract_stock=row['Subtract Stock'],
                 out_of_stock_status=row['Out of Stock Status'],
-                date_available=row['Date Available'],
+                date_available=date_available,  # <--- use the converted string
                 status=row['Status'],
                 is_new=row['Is New'],
                 viewed=row['Viewed'],
@@ -622,6 +637,8 @@ def import_products():
                 category_id=row['Category ID']
             )
             db.session.add(product)
+
+
 
         # Commit the changes to the database
         db.session.commit()
