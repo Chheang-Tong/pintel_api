@@ -7,6 +7,8 @@ from .cart import Cart, CartItem
 from .types import GUID
 from .coupon import Coupon, CartCoupon
 from .notification import Notification
+from .order import Order, OrderItem
+from .receipt import Receipt
 
 __all__ = [
     "Product",
@@ -18,6 +20,9 @@ __all__ = [
     "CartItem",
     "Coupon",
     "CartCoupon", #CartCoupon
-    "GUID",
+    "GUID"
     "Notification",
+    "Order",
+    "OrderItem",
+    "Receipt",
 ]

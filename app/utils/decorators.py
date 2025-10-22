@@ -33,8 +33,8 @@ def _current_user():
         uid = None
     return User.query.get(uid) if uid else None
 
-def role_required(*roles): # only manager or admin
-    """Your existing decorator is fine; here is a robust version."""
+# NEW: support a custom error message
+def role_required(*roles, message: str | None = None):
     def decorator(fn):
         @wraps(fn)
         def wrapper(*args, **kwargs):
@@ -42,13 +42,13 @@ def role_required(*roles): # only manager or admin
             if not u:
                 return jsonify(api_error("Unauthorized")), 401
             if u.role not in roles:
-                return jsonify(api_error("Forbidden")), 403
+                return jsonify(api_error(message or "Forbidden")), 403
             return fn(*args, **kwargs)
         return wrapper
     return decorator
 
-def role_at_least(min_role: str): # admin > manager > user
-    """Gate an endpoint by minimum role (e.g., manager or admin)."""
+# NEW: support a custom error message
+def role_at_least(min_role: str, message: str | None = None):  # admin > manager > user
     min_level = ROLE_LEVEL[min_role]
     def decorator(fn):
         @wraps(fn)
@@ -57,13 +57,12 @@ def role_at_least(min_role: str): # admin > manager > user
             if not u:
                 return jsonify(api_error("Unauthorized")), 401
             if ROLE_LEVEL.get(u.role, 0) < min_level:
-                return jsonify(api_error("Forbidden")), 403
+                return jsonify(api_error(message or "Forbidden")), 403
             return fn(*args, **kwargs)
         return wrapper
     return decorator
 
 def can_manage(actor: User, target: User) -> bool:
-    """Strictly greater role can manage lower role; equals/higher are blocked."""
     if not actor or not target:
         return False
     return ROLE_LEVEL[actor.role] > ROLE_LEVEL[target.role]

@@ -1,12 +1,11 @@
 # app/cart/routes.py
 from __future__ import annotations
 from flask import request, jsonify
-
 from app.utils.api import api_ok, api_error
 from ..extensions import db
 from . import bp
 from datetime import datetime, timezone
-from ..model import Product, Coupon, CartCoupon, Cart, CartItem 
+from ..model import Product, Coupon, CartCoupon, Cart, CartItem,Order, OrderItem 
 
 # # ---- standard API response format ------------------------------------------
 def ok(msg, data=None, status=200):
@@ -15,7 +14,6 @@ def err(msg, status=400, data=None):
     r = jsonify(api_error(msg, data)); r.status_code = status; return r
 
 # ---- helpers ---------------------------------------------------------------
-
 _COUPON_DTYPES = {"percent", "fixed"}
 
 def _now_utc():
@@ -89,8 +87,6 @@ def _can_apply_coupon(cart: Cart, c: "Coupon") -> tuple[bool, str | None]:
     return True, None
 # ============================================================================
 
-
-
 _VALID_DTYPES = {"percent", "fixed"}
 
 def _sanitize_discount(dtype: str | None, dval) -> tuple[str | None, float | None]:
@@ -118,39 +114,9 @@ def _clear_discount(item: CartItem):
     item.discount_type = None
     item.discount_value = None
 
-
-def register_error_handlers(app):
-    @app.errorhandler(ValueError)
-    def handle_value_error(e):
-        r = jsonify({"ok": False, "message": str(e), "data": None})
-        r.status_code = 422
-        return r
-
-
 # ---- discount caps ----------------------------------------------------------
 MAX_FIXED_DISCOUNT_RATE = 0.50 
 MAX_PERCENT_DISCOUNT     = 50.0
-
-# def _cap_fixed_to_unit_price(item: CartItem, dval: float) -> float:
-#     """Cap per-unit fixed discount to ≤ 50% of unit price, clamp [0, cap], round to cents."""
-#     unit_price = float(item.product_price or 0.0)
-#     cap = unit_price * MAX_FIXED_DISCOUNT_RATE
-#     try:
-#         d = float(dval)
-#     except Exception:
-#         d = 0.0
-#     d = max(0.0, min(d, cap))
-#     return round(d, 2)
-
-# def _cap_percent(dval: float) -> float:
-#     """Cap percent discount to ≤ 50%."""
-#     try:
-#         d = float(dval)
-#     except Exception:
-#         d = 0.0
-#     d = max(0.0, min(d, MAX_PERCENT_DISCOUNT))
-#     return round(d, 2)
-
 
 def _validate_percent(dval: float) -> float:
     try:
@@ -295,17 +261,12 @@ def add_item():
             quantity=qty,
         )
         db.session.add(item)
-
     db.session.commit()
 
     resp = ok("item added", cart.as_api(), status=201)
     resp.headers["X-Cart-Id"] = cart.uuid
     return resp
-# ==============================================
-# ---- qty helpers -----------------------------------------------------------
-
 def _stock_enabled(product) -> bool:
-    # treat None/"" as "yes"
     return (product.subtract_stock or "yes") == "yes"
 
 def _normalized_qty(product, requested_qty: int, *, current_qty: int = 0) -> int:
@@ -424,6 +385,7 @@ def update_item_by_product(product_id: int):
     resp = ok("item updated", cart.as_api(), status=200)
     resp.headers["X-Cart-Id"] = cart.uuid
     return resp
+
 # ==============================================================================
 # ---- remove a single item by cart-item id ----------------------------------
 @bp.delete("/items/<int:item_id>")
@@ -440,7 +402,6 @@ def remove_item(item_id: int):
     resp.headers["X-Cart-Id"] = cart.uuid
     return resp
 
-
 # ---- remove a single item by product_id ------------------------------------
 @bp.delete("/items/by-product/<int:product_id>")
 def remove_item_by_product(product_id: int):
@@ -456,7 +417,6 @@ def remove_item_by_product(product_id: int):
     resp.headers["X-Cart-Id"] = cart.uuid
     return resp
 
-
 # ---- clear all items (empty the cart, keep same cart uuid) -----------------
 @bp.delete("/items")
 def clear_cart_items():
@@ -468,7 +428,6 @@ def clear_cart_items():
     resp = ok("all items removed", cart.as_api(), status=200)
     resp.headers["X-Cart-Id"] = cart.uuid
     return resp
-
 
 # ---- remove the cart itself (soft-delete + hand back a fresh cart) ---------
 @bp.delete("")
@@ -548,7 +507,6 @@ def set_item_discount_by_product(product_id: int):
     resp.headers["X-Cart-Id"] = cart.uuid
     return resp
 
-
 @bp.patch("/discount")
 def set_cart_discount():
     """
@@ -605,14 +563,12 @@ def add_coupon():
     resp.headers["X-Cart-Id"] = cart.uuid
     return resp
 
-
 @bp.get("/coupons")
 def list_coupons():
     cart = _resolve_cart()
     resp = ok("coupons", cart.as_api(), status=200)
     resp.headers["X-Cart-Id"] = cart.uuid
     return resp
-
 
 @bp.delete("/coupons/<code>")
 def remove_coupon(code: str):
@@ -634,7 +590,6 @@ def remove_coupon(code: str):
     resp.headers["X-Cart-Id"] = cart.uuid
     return resp
 
-
 @bp.delete("/coupons")
 def clear_coupons():
     cart = _resolve_cart()
@@ -643,3 +598,137 @@ def clear_coupons():
     resp = ok("all coupons removed", cart.as_api(), status=200)
     resp.headers["X-Cart-Id"] = cart.uuid
     return resp
+
+
+def _gen_order_code():
+    # simple code generator; replace with sequence if you like
+    from datetime import datetime
+    return "ORD-" + datetime.utcnow().strftime("%Y%m%d-%H%M%S%f")[:18]
+
+@bp.post("/checkout")
+def checkout():
+    cart = _resolve_cart()
+    if not cart.items:
+        return err("cart is empty", 422)
+
+    payload = request.get_json(silent=True) or {}
+    customer = payload.get("customer") or {}
+    shipping_address = payload.get("shipping_address") or {}
+    payment_req = payload.get("payment") or {"method": "cod"}
+
+    if not customer.get("name") or not customer.get("phone"):
+        return err("customer name and phone are required", 422)
+
+    try:
+        # Lock product rows to avoid oversell
+        ids = [i.product_id for i in cart.items]
+        products = (
+            db.session.query(Product)
+            .filter(Product.id.in_(ids))
+            .with_for_update()
+            .all()
+        )
+        pmap = {p.id: p for p in products}
+
+        # Recompute & validate
+        subtotal_before = 0.0
+        items_discount_total = 0.0
+        snapshot_items = []
+
+        for it in cart.items:
+            p = pmap.get(it.product_id)
+            if not p or p.status is False:
+                return err(f"product {it.product_id} unavailable", 409)
+
+            # keep qty; ensure still valid
+            qty = _normalized_qty(p, it.quantity, current_qty=0)
+            if qty < 1 or qty != it.quantity:
+                return err(f"requested qty for {p.name} not available", 409)
+
+            unit_price = float(p.price or it.product_price or 0.0)
+            it.product_price = unit_price  # ensure discount computed off current price
+
+            unit_discount = _unit_discount_amount(it)  # uses your caps
+            unit_final = round(unit_price - unit_discount, 2)
+
+            line_before = round(unit_price * qty, 2)
+            line_total  = round(unit_final * qty, 2)
+
+            subtotal_before += line_before
+            items_discount_total += round(line_before - line_total, 2)
+
+            snapshot_items.append({
+                "product_id": it.product_id,
+                "name": p.name,
+                "image_url": getattr(it, "image_url", None),
+                "unit_price": unit_price,
+                "discount_type": it.discount_type,
+                "discount_value": it.discount_value,
+                "unit_discount": unit_discount,
+                "unit_final_price": unit_final,
+                "quantity": qty,
+                "line_total": line_total,
+            })
+
+        # Cart-level discount & coupons
+        subtotal_after_items = _cart_subtotal_after_item_and_cart_discounts(cart)
+
+        coupon_total = 0.0
+        if cart.coupons:
+            for link in cart.coupons:
+                c = link.coupon
+                ok_apply, reason = _can_apply_coupon(cart, c)
+                if not ok_apply:
+                    return err(f"coupon '{c.code}' invalid: {reason}", 422)
+                coupon_total += _coupon_discount_amount(c, subtotal_after_items - coupon_total)
+
+        total = round(max(0.0, subtotal_after_items - coupon_total), 2)
+
+        # Create order + items
+        order = Order(
+            code=_gen_order_code(),
+            status="pending",
+            customer_name=customer.get("name"),
+            phone=customer.get("phone"),
+            email=customer.get("email"),
+            address_json=shipping_address,
+            subtotal=round(subtotal_before, 2),
+            items_discount_total=round(items_discount_total, 2),
+            cart_discount_amount=round(subtotal_before - subtotal_after_items - items_discount_total, 2),
+            coupon_total=round(coupon_total, 2),
+            total=total,
+            cart_uuid=cart.uuid,
+        )
+        db.session.add(order)
+        db.session.flush()
+
+        for s in snapshot_items:
+            db.session.add(OrderItem(order_id=order.id, **s))
+
+        # Decrement stock for tracked products
+        for it in cart.items:
+            p = pmap[it.product_id]
+            if (p.subtract_stock or "yes") == "yes":
+                if int(p.quantity or 0) < it.quantity:
+                    return err(f"{p.name} just sold out", 409)
+                p.quantity = int(p.quantity or 0) - int(it.quantity or 0)
+
+        # Payment handling (stub)
+        if (payment_req.get("method") or "cod").lower() != "cod":
+            # TODO: integrate gateway here
+            pass
+
+        # Close cart
+        cart.status = "checked_out"
+        cart.items.clear()
+        cart.coupons.clear()
+
+        db.session.commit()
+
+        resp = ok("order created", {"order": order.as_api()}, status=201)
+        resp.headers["X-Order-Id"] = str(order.id)
+        return resp
+
+    except Exception as e:
+        db.session.rollback()
+        return err(f"checkout failed: {e}", 500)

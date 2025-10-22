@@ -200,7 +200,7 @@ def admin_settings():
     return {"msg": "Admins only"}
 
 @bp.get("/users")
-@role_at_least("manager")
+@role_at_least("manager", message="Only managers and admins can list users")
 def list_users():
     actor = _current_user()
     q = User.query
