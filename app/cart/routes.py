@@ -684,7 +684,6 @@ def checkout():
 
         total = round(max(0.0, subtotal_after_items - coupon_total), 2)
 
-        # Create order + items
         order = Order(
             code=_gen_order_code(),
             status="pending",
